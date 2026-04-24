@@ -8,7 +8,7 @@ const refreshTokenSchema = new mongoose.Schema({
   },
   user: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
+    ref: 'User_practice1',
     required: true
   },
   expiresAt: {
@@ -28,5 +28,5 @@ refreshTokenSchema.methods.isActive = function() {
   return !this.revokedAt && this.expiresAt > new Date();
 };
 
-const RefreshToken = mongoose.model('RefreshToken', refreshTokenSchema);
+const RefreshToken = mongoose.model('RefreshToken_Practice1', refreshTokenSchema);
 export default RefreshToken;

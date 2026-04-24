@@ -16,5 +16,6 @@ app.listen(PORT, () => {
 });
 
 app.use('/api/user', user);
+app.use('/upload', express.static('upload'));
 
 export default app;

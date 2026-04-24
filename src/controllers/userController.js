@@ -5,10 +5,14 @@ import { handleHttpError } from '../utils/handleError.js';
 import RefreshToken from '../models/RefreshToken.js';
 import { generateAccessToken, generateRefreshToken, getRefreshTokenExpiry } from '../utils/handleJwt.js';
 
-/**
- * Login - genera ambos tokens
- */
+// Login - login to existing user and generate both tokens
 export const login = async (req, res) => {
+  // Verify if another user is logged in
+  const activeSession = await RefreshToken.findOne({ revokedAt: { $exists: false }});
+  if (activeSession) {
+    return res.status(403).json({ error: true, message: 'An active session already exists. Please log out from other devices.' });
+  }
+  
   const { email, password } = req.body;
 
   const user = await User.findOne({ email }).select('+password');
@@ -17,11 +21,11 @@ export const login = async (req, res) => {
     return res.status(401).json({ error: true, message: 'Invalid credentials' });
   }
 
-  // Generar tokens
+  // Generate tokens
   const accessToken = generateAccessToken(user);
   const refreshToken = generateRefreshToken();
 
-  // Guardar refresh token en BD
+  // Save refresh token in database with user reference and expiry
   await RefreshToken.create({
     token: refreshToken,
     user: user._id,
@@ -29,7 +33,7 @@ export const login = async (req, res) => {
     createdByIp: req.ip
   });
 
-  // Ocultar password
+  // Hide password
   user.password = undefined;
 
   res.json({
@@ -39,38 +43,46 @@ export const login = async (req, res) => {
   });
 };
 
+// Register - create user and generate tokens
 export const register = async (req, res) => {
   try {
-    // Verificar si el email ya existe
+    // Verify if email already exists
     const existingUser = await User.findOne({ email: req.body.email });
     if (existingUser) {
       handleHttpError(res, 'EMAIL_ALREADY_EXISTS', 409);
       return;
     }
+
+    // Verify if another user is logged in
+    const activeSession = await RefreshToken.findOne({ revokedAt: { $exists: false }});
+    if (activeSession) {
+      return res.status(403).json({ error: true, message: 'An active session already exists. Please log out from other devices.' });
+    }
     
-    // Cifrar contraseña
+    // Encrypt password
     const password = await encrypt(req.body.password);
+
+    // Create random 6-digit verification code for email validation
+    const verificationCode = Math.floor(100000 + Math.random() * 900000);
     
-    // Crear usuario con password cifrada
-    const body = { ...req.body, password };
+    // Create user with encrypted password
+    const body = { ...req.body, password, verificationCode };
     const dataUser = await User.create(body);
     
-    // Ocultar password en la respuesta
+    // Hide password in the response
     dataUser.set('password', undefined, { strict: false });
 
-    // Generar tokens
+    // Generate tokens
     const accessToken = generateAccessToken(dataUser);
     const refreshToken = generateRefreshToken();
 
-    // Guardar refresh token en BD
+    // Save refresh token in database with user reference and expiry
     await RefreshToken.create({
       token: refreshToken,
       user: dataUser._id,
       expiresAt: getRefreshTokenExpiry(),
       createdByIp: req.ip
     });
-
-    eventBus.emit('user:registered', dataUser);
     
     res.status(201).send({ accessToken, refreshToken, user: dataUser });
   } catch (err) {
@@ -79,32 +91,28 @@ export const register = async (req, res) => {
   }
 };
 
-/**
- * Refresh - obtener nuevo access token
- */
+// Obtain a new access token using the refresh token
 export const refreshToken = async (req, res) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken) {
-    return res.status(400).json({ error: true, message: 'Refresh token requerido' });
+    return res.status(400).json({ error: true, message: 'Refresh token required' });
   }
 
-  // Buscar token en BD
+  // Search in database
   const storedToken = await RefreshToken.findOne({ token: refreshToken }).populate('user');
 
   if (!storedToken || !storedToken.isActive()) {
-    return res.status(401).json({ error: true, message: 'Refresh token inválido o expirado' });
+    return res.status(401).json({ error: true, message: 'Refresh token invalid or expired' });
   }
 
-  // Generar nuevo access token
+  // Generate new access token
   const accessToken = generateAccessToken(storedToken.user);
 
   res.json({ accessToken });
 };
 
-/**
- * Logout - revocar refresh token
- */
+// Logout - revoke refresh token
 export const logout = async (req, res) => {
   const { refreshToken } = req.body;
 
@@ -113,11 +121,13 @@ export const logout = async (req, res) => {
       { token: refreshToken },
       { revokedAt: new Date(), revokedByIp: req.ip }
     );
+    res.json({ message: 'Session closed' });
+  } else {
+    res.status(400).json({ message: 'Refresh token required for logout' });
   }
-
-  res.json({ message: 'Sesión cerrada' });
 };
 
+// Validate email with verification code
 export const validateEmail = async (req, res) => {
   const { code } = req.body;
   const userId = req.user._id;
@@ -125,15 +135,16 @@ export const validateEmail = async (req, res) => {
   const user = await User.findById(userId);
   if (!user) return res.status(404).json({ message: 'User not found' });
 
+  if (user.status === 'verified') return res.status(400).json({ message: 'Email already verified' });
+
   if (user.verificationAttempts <= 0) {
-    return res.status(429).json({ message: 'Too many attempts' });
+    return res.status(429).json({ message: 'Out of attempts' });
   }
 
   if (user.verificationCode === code) {
     user.status = 'verified';
     user.verificationCode = null;
     await user.save();
-    eventBus.emit('user:verified', user);
     return res.json({ message: 'Email verified' });
   }
 
@@ -144,25 +155,26 @@ export const validateEmail = async (req, res) => {
   });
 };
 
+// Update user profile (name, lastName, nif)
 export const updateProfile = async (req, res, next) => {
   try {
+    const user = req.user;
     const { name, lastName, nif } = req.body;
-    const userId = req.user._id;
-
-    const user = await User.findByIdAndUpdate(
-      userId,
-      { name, lastName, nif },
-      { new: true, runValidators: true }
-    );
 
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    if (name) user.name = name;
+    if (lastName) user.lastName = lastName;
+    if (nif) user.nif = nif;
+
+    await user.save();
     res.json({ message: 'Profile updated successfully', user });
   } catch (err) {
     handleHttpError(res, 'ERROR_UPDATING_PROFILE');
   }
 };
 
+// Create company for user or assign to existing company by CIF
 export const updateCompany = async (req, res) => {
   const { name, cif, address, isFreelance } = req.body;
   const user = req.user;
@@ -182,6 +194,8 @@ export const updateCompany = async (req, res) => {
     if (!company) {
       company = await Company.create({ owner: user._id, name, cif, address });
     } else {
+      company.isFreelance = false;
+      await company.save();
       user.role = 'guest';
     }
   }
@@ -199,8 +213,9 @@ export const updateLogo = async (req, res) => {
     const user = await User.findById(req.user._id);
     if (!user.company) return res.status(400).json({ message: 'User has no company associated' });
 
-    // Assuming multer saves to 'uploads/' and we store the path
-    const logoUrl = `../images/${req.file.filename}`;
+    // Assuming multer saves to 'upload/' and we store the path
+    const { filename } = req.file;
+    const logoUrl = `.../../upload/${filename}`;
     
     const company = await Company.findByIdAndUpdate(
       user.company,
@@ -229,9 +244,9 @@ export const deleteAccount = async (req, res) => {
       await User.findByIdAndUpdate(userId, { deleted: true });
     } else {
       await User.findByIdAndDelete(userId);
+      await RefreshToken.findOneAndDelete({ user: userId });
     }
 
-    eventBus.emit('user:deleted', { userId, soft: soft === 'true' });
     res.json({ message: `User deleted successfully (${soft === 'true' ? 'soft' : 'hard'})` });
   } catch (err) {
     handleHttpError(res, 'ERROR_DELETING_USER');
@@ -274,8 +289,6 @@ export const sendInvite = async (req, res) => {
       status: 'pending',
       password: await encrypt(Math.random().toString(36).slice(-10)) 
     });
-
-    eventBus.emit('user:invited', newUser);
 
     res.status(201).json({ message: 'User invited successfully', user: newUser });
   } catch (err) {

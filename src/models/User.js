@@ -23,7 +23,6 @@ const userSchema = new mongoose.Schema(
     },
     nif: {
       type: String,
-      required: [true, 'NIF is required'],
       unique: true
     },
     role: {
@@ -38,7 +37,6 @@ const userSchema = new mongoose.Schema(
     },
     verificationCode: {
       type: Number,
-      default: 0,
     },
     verificationAttempts: {
       type: Number,
@@ -65,6 +63,6 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-const User = mongoose.model('User', userSchema);
+const User = mongoose.model('User_practice1', userSchema);
 
 export default User;
